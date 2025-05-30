@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>SoundWalk Helsinki</title>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        
+        body {
+            background: #000;
+            color: #fff;
+            font-family: -apple-system, sans-serif;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        #startScreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        
+        #startScreen h1 {
+            font-size: 48px;
+            font-weight: 200;
+            margin-bottom: 20px;
+            background: linear-gradient(45deg, #3b82f6, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        #startButton {
+            padding: 20px 40px;
+            font-size: 20px;
+            background: linear-gradient(45deg, #3b82f6, #8b5cf6);
+            border: none;
+            border-radius: 30px;
+            color: white;
+            cursor: pointer;
+        }
+        
+        #app {
+            display: none;
+            height: 100vh;
+            position: relative;
+        }
+        
+        .status {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            opacity: 0.8;
+            z-index: 10;
+        }
+        
+        .status-item {
+            background: rgba(255,255,255,0.1);
+            padding: 8px 12px;
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+        }
+        
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        .controls {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 20px;
+            z-index: 10;
+        }
+        
+        .control-btn {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(255,255,255,0.1);
+            color: white;
+            font-size: 24px;
+            backdrop-filter: blur(10px);
+            cursor: pointer;
+        }
+        
+        .control-btn.active {
+            background: rgba(59, 130, 246, 0.5);
+        }
+        
+        .sound-indicator {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(139, 92, 246, 0.8), transparent);
+            pointer-events: none;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.5); opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Start Screen -->
+    <div id="startScreen">
+        <h1>SoundWalk</h1>
+        <p style="margin-bottom: 30px; opacity: 0.6;">Helsinki</p>
+        <button id="startButton">Start Walking</button>
+        <p style="margin-top: 20px; font-size: 14px; opacity: 0.4;">
+            Put phone in chest pouch • Walk • Create sounds
+        </p>
+    </div>
+    
+    <!-- Main App -->
+    <div id="app">
+        <div class="status">
+            <div class="status-item">📍 <span id="gps">Loading...</span></div>
+            <div class="status-item">🧭 <span id="compass">0°</span></div>
+            <div class="status-item">👥 <span id="peers">0</span></div>
+        </div>
+        
+        <canvas id="canvas"></canvas>
+        
+        <div class="controls">
+            <button class="control-btn active" id="listenBtn">👂</button>
+            <button class="control-btn" id="createBtn">✨</button>
+            <button class="control-btn" id="collabBtn">👥</button>
+        </div>
+    </div>
+
+    <script>
+        // ========================================
+        // COMPLETE SOUNDWALK APP
+        // ========================================
+        
+        let audioContext;
+        let isRunning = false;
+        let currentMode = 'listen';
+        
+        // Sensor data
+        let userLocation = { lat: 60.1699, lng: 24.9384 };
+        let compass = 0;
+        let motion = { x: 0, y: 0, z: 0 };
+        
+        // Sound sources
+        let sounds = new Map();
+        let peers = new Map();
+        
+        // Canvas
+        let canvas, ctx;
+        
+        // Gesture tracking
+        let gestureSynth;
+        
+        // ========================================
+        // SPATIAL AUDIO ENGINE
+        // ========================================
+        
+        class SpatialSound {
+            constructor(context, position) {
+                this.context = context;
+                this.position = position;
+                
+                // Create audio nodes
+                this.oscillator = context.createOscillator();
+                this.gain = context.createGain();
+                this.panner = context.createPanner();
+                
+                // Configure spatial audio
+                this.panner.panningModel = 'HRTF';
+                this.panner.distanceModel = 'inverse';
+                this.panner.refDistance = 1;
+                this.panner.maxDistance = 100;
+                
+                // Connect nodes
+                this.oscillator.connect(this.gain);
+                this.gain.connect(this.panner);
+                this.panner.connect(context.destination);
+                
+                // Set initial position
+                this.updatePosition(position);
+                
+                // Start oscillator
+                this.oscillator.start();
+                this.gain.gain.value = 0;
+            }
+            
+            updatePosition(position) {
+                this.position = position;
+                const distance = this.calculateDistance();
+                const angle = this.calculateAngle();
+                
+                // Convert to 3D coordinates
+                const x = Math.sin(angle) * distance;
+                const z = Math.cos(angle) * distance;
+                
+                this.panner.setPosition(x, 0, z);
+            }
+            
+            calculateDistance() {
+                // Simplified distance calculation
+                const dx = this.position.lat - userLocation.lat;
+                const dy = this.position.lng - userLocation.lng;
+                return Math.sqrt(dx*dx + dy*dy) * 111000; // Convert to meters
+            }
+            
+            calculateAngle() {
+                const dx = this.position.lng - userLocation.lng;
+                const dy = this.position.lat - userLocation.lat;
+                return Math.atan2(dx, dy) - (compass * Math.PI / 180);
+            }
+            
+            play(frequency = 440, duration = 1) {
+                const now = this.context.currentTime;
+                
+                this.oscillator.frequency.setValueAtTime(frequency, now);
+                this.gain.gain.setValueAtTime(0, now);
+                this.gain.gain.linearRampToValueAtTime(0.2, now + 0.1);
+                this.gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+            }
+            
+            dispose() {
+                this.oscillator.stop();
+                this.oscillator.disconnect();
+                this.gain.disconnect();
+                this.panner.disconnect();
+            }
+        }
+        
+        // ========================================
+        // GESTURE SYNTHESIS
+        // ========================================
+        
+        class GestureSynth {
+            constructor(context) {
+                this.context = context;
+                this.isRecording = false;
+                this.gestureData = [];
+            }
+            
+            startGesture(x, y) {
+                this.isRecording = true;
+                this.gestureData = [{x, y, time: Date.now()}];
+            }
+            
+            updateGesture(x, y) {
+                if (this.isRecording) {
+                    this.gestureData.push({x, y, time: Date.now()});
+                }
+            }
+            
+            endGesture() {
+                if (!this.isRecording) return;
+                
+                this.isRecording = false;
+                
+                // Analyze gesture
+                const duration = this.gestureData[this.gestureData.length - 1].time - this.gestureData[0].time;
+                const distance = this.calculateGestureDistance();
+                const speed = distance / duration;
+                
+                // Create sound based on gesture
+                this.playGestureSound(speed, distance);
+            }
+            
+            calculateGestureDistance() {
+                let distance = 0;
+                for (let i = 1; i < this.gestureData.length; i++) {
+                    const dx = this.gestureData[i].x - this.gestureData[i-1].x;
+                    const dy = this.gestureData[i].y - this.gestureData[i-1].y;
+                    distance += Math.sqrt(dx*dx + dy*dy);
+                }
+                return distance;
+            }
+            
+            playGestureSound(speed, distance) {
+                const osc = this.context.createOscillator();
+                const gain = this.context.createGain();
+                const filter = this.context.createBiquadFilter();
+                
+                // Map gesture to sound parameters
+                const frequency = 200 + speed * 500;
+                const filterFreq = 500 + distance;
+                const duration = Math.min(3, distance / 100);
+                
+                // Configure nodes
+                osc.frequency.value = frequency;
+                filter.frequency.value = filterFreq;
+                filter.Q.value = 5;
+                
+                // Connect
+                osc.connect(filter);
+                filter.connect(gain);
+                gain.connect(this.context.destination);
+                
+                // Envelope
+                const now = this.context.currentTime;
+                gain.gain.setValueAtTime(0, now);
+                gain.gain.linearRampToValueAtTime(0.3, now + 0.1);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+                
+                osc.start(now);
+                osc.stop(now + duration);
+                
+                // Store sound location
+                const soundId = Date.now().toString();
+                sounds.set(soundId, {
+                    position: {...userLocation},
+                    frequency: frequency,
+                    created: Date.now()
+                });
+                
+                // Share with peers
+                broadcastSound(soundId, userLocation, frequency);
+            }
+        }
+        
+        // ========================================
+        // APP INITIALIZATION
+        // ========================================
+        
+        async function startApp() {
+            document.getElementById('startScreen').style.display = 'none';
+            document.getElementById('app').style.display = 'block';
+            
+            // Initialize audio
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            gestureSynth = new GestureSynth(audioContext);
+            
+            // Setup canvas
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+            resizeCanvas();
+            
+            // Setup sensors
+            await setupSensors();
+            
+            // Setup interaction
+            setupInteraction();
+            
+            // Setup peer discovery
+            setupPeerDiscovery();
+            
+            // Start render loop
+            isRunning = true;
+            render();
+        }
+        
+        // Add event listener for start button
+        document.getElementById('startButton').addEventListener('click', startApp);
+        
+        // ========================================
+        // SENSOR SETUP
+        // ========================================
+        
+        async function setupSensors() {
+            // GPS
+            if ('geolocation' in navigator) {
+                navigator.geolocation.watchPosition(
+                    pos => {
+                        userLocation.lat = pos.coords.latitude;
+                        userLocation.lng = pos.coords.longitude;
+                        document.getElementById('gps').textContent = 
+                            `${userLocation.lat.toFixed(4)}, ${userLocation.lng.toFixed(4)}`;
+                        
+                        updateSpatialAudio();
+                    },
+                    err => {
+                        console.log('GPS error:', err);
+                        document.getElementById('gps').textContent = 'GPS unavailable';
+                    },
+                    { enableHighAccuracy: true }
+                );
+            }
+            
+            // Compass
+            if (window.DeviceOrientationEvent) {
+                // Request permission on iOS
+                if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    try {
+                        await DeviceOrientationEvent.requestPermission();
+                    } catch (e) {
+                        console.log('Orientation permission denied');
+                    }
+                }
+                
+                window.addEventListener('deviceorientation', e => {
+                    compass = e.alpha || 0;
+                    document.getElementById('compass').textContent = Math.round(compass) + '°';
+                });
+            }
+            
+            // Motion (for shake detection)
+            if (window.DeviceMotionEvent) {
+                // Request permission on iOS
+                if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                    try {
+                        await DeviceMotionEvent.requestPermission();
+                    } catch (e) {
+                        console.log('Motion permission denied');
+                    }
+                }
+                
+                window.addEventListener('devicemotion', e => {
+                    if (e.acceleration) {
+                        motion = {
+                            x: e.acceleration.x || 0,
+                            y: e.acceleration.y || 0,
+                            z: e.acceleration.z || 0
+                        };
+                        
+                        // Detect shake
+                        const magnitude = Math.sqrt(motion.x**2 + motion.y**2 + motion.z**2);
+                        if (magnitude > 15 && currentMode === 'create') {
+                            createShakeSound(magnitude);
+                        }
+                    }
+                });
+            }
+        }
+        
+        // ========================================
+        // INTERACTION
+        // ========================================
+        
+        function setupInteraction() {
+            // Touch events
+            canvas.addEventListener('touchstart', handleTouchStart, {passive: false});
+            canvas.addEventListener('touchmove', handleTouchMove, {passive: false});
+            canvas.addEventListener('touchend', handleTouchEnd, {passive: false});
+            
+            // Mouse events (for testing)
+            canvas.addEventListener('mousedown', e => {
+                const mockTouch = {
+                    touches: [{
+                        clientX: e.clientX,
+                        clientY: e.clientY
+                    }],
+                    preventDefault: () => {}
+                };
+                handleTouchStart(mockTouch);
+            });
+            
+            canvas.addEventListener('mousemove', e => {
+                if (e.buttons > 0) {
+                    const mockTouch = {
+                        touches: [{
+                            clientX: e.clientX,
+                            clientY: e.clientY
+                        }],
+                        preventDefault: () => {}
+                    };
+                    handleTouchMove(mockTouch);
+                }
+            });
+            
+            canvas.addEventListener('mouseup', e => {
+                const mockTouch = {
+                    touches: [],
+                    preventDefault: () => {}
+                };
+                handleTouchEnd(mockTouch);
+            });
+            
+            // Mode buttons
+            document.getElementById('listenBtn').addEventListener('click', () => setMode('listen'));
+            document.getElementById('createBtn').addEventListener('click', () => setMode('create'));
+            document.getElementById('collabBtn').addEventListener('click', () => setMode('collab'));
+            
+            window.addEventListener('resize', resizeCanvas);
+        }
+        
+        function handleTouchStart(e) {
+            e.preventDefault();
+            
+            if (currentMode === 'create' && e.touches.length > 0) {
+                const touch = e.touches[0];
+                gestureSynth.startGesture(touch.clientX, touch.clientY);
+            }
+        }
+        
+        function handleTouchMove(e) {
+            e.preventDefault();
+            
+            if (currentMode === 'create' && e.touches.length > 0) {
+                const touch = e.touches[0];
+                gestureSynth.updateGesture(touch.clientX, touch.clientY);
+            }
+        }
+        
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            
+            if (currentMode === 'create') {
+                gestureSynth.endGesture();
+            }
+        }
+        
+        // ========================================
+        // SOUND CREATION
+        // ========================================
+        
+        let lastShakeTime = 0;
+        
+        function createShakeSound(intensity) {
+            // Debounce shake sounds
+            const now = Date.now();
+            if (now - lastShakeTime < 500) return;
+            lastShakeTime = now;
+            
+            const osc = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            
+            // Map shake to frequency
+            osc.frequency.value = 100 + intensity * 20;
+            
+            osc.connect(gain);
+            gain.connect(audioContext.destination);
+            
+            // Quick burst
+            const audioNow = audioContext.currentTime;
+            gain.gain.setValueAtTime(0.2, audioNow);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioNow + 0.2);
+            
+            osc.start(audioNow);
+            osc.stop(audioNow + 0.2);
+        }
+        
+        function updateSpatialAudio() {
+            // Update position of all spatial sounds
+            sounds.forEach((sound, id) => {
+                if (sound.spatialNode) {
+                    sound.spatialNode.updatePosition(sound.position);
+                }
+            });
+        }
+        
+        // ========================================
+        // PEER DISCOVERY
+        // ========================================
+        
+        function setupPeerDiscovery() {
+            // Simple broadcast channel for local discovery
+            try {
+                const channel = new BroadcastChannel('soundwalk-helsinki');
+                
+                // Announce presence
+                setInterval(() => {
+                    channel.postMessage({
+                        type: 'announce',
+                        id: 'user-' + Math.random().toString(36).substr(2, 9),
+                        location: userLocation
+                    });
+                }, 1000);
+                
+                // Listen for others
+                channel.onmessage = e => {
+                    if (e.data.type === 'announce') {
+                        peers.set(e.data.id, {
+                            location: e.data.location,
+                            lastSeen: Date.now()
+                        });
+                        
+                        updatePeerCount();
+                    } else if (e.data.type === 'sound') {
+                        // Receive sound from peer
+                        const sound = new SpatialSound(audioContext, e.data.location);
+                        sound.play(e.data.frequency);
+                        
+                        sounds.set(e.data.id, {
+                            position: e.data.location,
+                            frequency: e.data.frequency,
+                            spatialNode: sound
+                        });
+                    }
+                };
+                
+                window.broadcastChannel = channel;
+            } catch (e) {
+                console.log('BroadcastChannel not supported');
+            }
+        }
+        
+        function broadcastSound(id, location, frequency) {
+            if (window.broadcastChannel) {
+                window.broadcastChannel.postMessage({
+                    type: 'sound',
+                    id: id,
+                    location: location,
+                    frequency: frequency
+                });
+            }
+        }
+        
+        function updatePeerCount() {
+            // Remove old peers
+            const now = Date.now();
+            for (let [id, peer] of peers) {
+                if (now - peer.lastSeen > 5000) {
+                    peers.delete(id);
+                }
+            }
+            
+            document.getElementById('peers').textContent = peers.size;
+        }
+        
+        // ========================================
+        // RENDERING
+        // ========================================
+        
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        
+        function render() {
+            if (!isRunning) return;
+            
+            // Clear canvas
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw compass
+            if (currentMode !== 'listen') {
+                drawCompass();
+            }
+            
+            // Draw sounds
+            sounds.forEach((sound, id) => {
+                drawSound(sound);
+            });
+            
+            // Draw gesture trail
+            if (gestureSynth && gestureSynth.isRecording && gestureSynth.gestureData.length > 1) {
+                drawGestureTrail();
+            }
+            
+            requestAnimationFrame(render);
+        }
+        
+        function drawCompass() {
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            const radius = 100;
+            
+            ctx.save();
+            ctx.translate(centerX, centerY);
+            ctx.rotate(-compass * Math.PI / 180);
+            
+            // Compass circle
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.2)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(0, 0, radius, 0, Math.PI * 2);
+            ctx.stroke();
+            
+            // North indicator
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.6)';
+            ctx.beginPath();
+            ctx.moveTo(0, -radius + 10);
+            ctx.lineTo(-5, -radius + 20);
+            ctx.lineTo(5, -radius + 20);
+            ctx.closePath();
+            ctx.fill();
+            
+            ctx.restore();
+        }
+        
+        function drawSound(sound) {
+            // Simple visualization at center for now
+            const x = canvas.width / 2 + Math.random() * 100 - 50;
+            const y = canvas.height / 2 + Math.random() * 100 - 50;
+            
+            ctx.fillStyle = 'rgba(139, 92, 246, 0.5)';
+            ctx.beginPath();
+            ctx.arc(x, y, 20, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        
+        function drawGestureTrail() {
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.8)';
+            ctx.lineWidth = 3;
+            ctx.lineCap = 'round';
+            
+            ctx.beginPath();
+            ctx.moveTo(gestureSynth.gestureData[0].x, gestureSynth.gestureData[0].y);
+            
+            for (let i = 1; i < gestureSynth.gestureData.length; i++) {
+                ctx.lineTo(gestureSynth.gestureData[i].x, gestureSynth.gestureData[i].y);
+            }
+            
+            ctx.stroke();
+        }
+        
+        // ========================================
+        // MODE SWITCHING
+        // ========================================
+        
+        function setMode(newMode) {
+            currentMode = newMode;
+            
+            // Update UI
+            document.querySelectorAll('.control-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            if (newMode === 'listen') {
+                document.getElementById('listenBtn').classList.add('active');
+            } else if (newMode === 'create') {
+                document.getElementById('createBtn').classList.add('active');
+            } else if (newMode === 'collab') {
+                document.getElementById('collabBtn').classList.add('active');
+                startCollaboration();
+            }
+        }
+        
+        function startCollaboration() {
+            console.log('Collaboration mode active');
+            // Enhanced peer features would go here
+        }
+    </script>
+</body>
+</html>
